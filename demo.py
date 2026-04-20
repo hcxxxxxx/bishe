@@ -32,6 +32,8 @@ def run_tts(
     intensity: str,
     secondary_emotion: str,
     context: str,
+    prompt_audio: str | None,
+    spk_id: str,
     prompt_mode: str,
 ):
     if not text.strip():
@@ -45,6 +47,8 @@ def run_tts(
         context=context.strip() or None,
         language=language,
         use_optimized_prompt=(prompt_mode == "optimized"),
+        prompt_audio_path=prompt_audio or None,
+        spk_id=spk_id.strip() or None,
     )
 
     pipeline = get_pipeline()
@@ -83,15 +87,17 @@ def build_demo() -> gr.Blocks:
         with gr.Row():
             secondary_emotion = gr.Textbox(label="次情感（可选）", value="sad")
             context = gr.Textbox(label="上下文（可选）", value="生日后独自回家时")
+            spk_id = gr.Textbox(label="spk_id（可选，SFT兜底）", value="")
             prompt_mode = gr.Dropdown(["baseline", "optimized"], value="optimized", label="Prompt版本")
 
+        prompt_audio = gr.Audio(label="参考音频（推荐，CosyVoice2 instruct2）", type="filepath")
         btn = gr.Button("生成语音")
         audio = gr.Audio(label="生成音频", type="filepath")
         info = gr.Code(label="元数据", language="json")
 
         btn.click(
             fn=run_tts,
-            inputs=[text, language, primary_emotion, intensity, secondary_emotion, context, prompt_mode],
+            inputs=[text, language, primary_emotion, intensity, secondary_emotion, context, prompt_audio, spk_id, prompt_mode],
             outputs=[audio, info],
         )
 

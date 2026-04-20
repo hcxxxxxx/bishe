@@ -11,7 +11,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 from huggingface_hub import snapshot_download
@@ -186,18 +186,49 @@ class CosyVoiceModelLoader:
 
         sig = inspect.signature(fn)
         accepted = {}
+        has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
         for k, v in kwargs.items():
-            if k in sig.parameters:
+            if has_var_keyword or k in sig.parameters:
                 accepted[k] = v
 
         output = fn(**accepted)
         return self._materialize_output(output)
 
+    def _call_with_patterns(
+        self,
+        fn_name: str,
+        kwargs_patterns: Sequence[Dict[str, Any]],
+        args_patterns: Sequence[Tuple[Any, ...]],
+    ) -> List[Dict[str, Any]]:
+        """Try one model method with multiple kwargs/args patterns."""
+        fn = getattr(self.model, fn_name, None)
+        if fn is None:
+            raise AttributeError(f"Method `{fn_name}` not found.")
+
+        errors: List[str] = []
+        for kwargs in kwargs_patterns:
+            try:
+                outputs = self._call_if_supported(fn_name, kwargs) or []
+                if outputs:
+                    return outputs
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"kwargs={list(kwargs.keys())}: {type(exc).__name__}: {exc}")
+
+        for args in args_patterns:
+            try:
+                outputs = self._materialize_output(fn(*args))
+                if outputs:
+                    return outputs
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"args_len={len(args)}: {type(exc).__name__}: {exc}")
+
+        raise RuntimeError("; ".join(errors) if errors else "No valid output returned.")
+
     def synthesize(
         self,
         text: str,
         instruct_text: str,
-        prompt_speech_16k: Optional[torch.Tensor] = None,
+        prompt_speech_16k: Optional[Any] = None,
         sample_rate: int = 22050,
         extra_kwargs: Optional[Dict[str, Any]] = None,
     ) -> List[torch.Tensor]:
@@ -217,28 +248,151 @@ class CosyVoiceModelLoader:
             "prompt_text": instruct_text,
             "prompt_speech_16k": prompt_speech_16k,
             "sample_rate": sample_rate,
+            "stream": False,
         }
         if extra_kwargs:
             kwargs.update(extra_kwargs)
 
-        # Priority: instruction-aware inference.
-        for method in ["inference_instruct2", "inference_instruct", "inference"]:
+        spk_id = kwargs.get("spk_id")
+        method_errors: List[str] = []
+        available_methods = sorted([name for name in dir(self.model) if name.startswith("inference")])
+
+        # Priority: instruction-aware inference. For CosyVoice2 this commonly
+        # needs prompt_speech_16k, so we try both with/without prompt patterns.
+        planned_calls: List[Tuple[str, Sequence[Dict[str, Any]], Sequence[Tuple[Any, ...]]]] = [
+            (
+                "inference_instruct2",
+                [
+                    {
+                        "tts_text": text,
+                        "instruct_text": instruct_text,
+                        "prompt_speech_16k": prompt_speech_16k,
+                        "stream": False,
+                    },
+                    {
+                        "text": text,
+                        "instruct_text": instruct_text,
+                        "prompt_speech_16k": prompt_speech_16k,
+                        "stream": False,
+                    },
+                    {
+                        "tts_text": text,
+                        "instruct_text": instruct_text,
+                        "stream": False,
+                    },
+                    {
+                        "text": text,
+                        "instruct_text": instruct_text,
+                        "stream": False,
+                    },
+                ],
+                [
+                    (text, instruct_text, prompt_speech_16k),
+                    (text, instruct_text),
+                ],
+            ),
+            (
+                "inference_zero_shot",
+                [
+                    {
+                        "tts_text": text,
+                        "prompt_text": instruct_text,
+                        "prompt_speech_16k": prompt_speech_16k,
+                        "stream": False,
+                    },
+                    {
+                        "text": text,
+                        "prompt_text": instruct_text,
+                        "prompt_speech_16k": prompt_speech_16k,
+                        "stream": False,
+                    },
+                ],
+                [
+                    (text, instruct_text, prompt_speech_16k),
+                ],
+            ),
+            (
+                "inference_instruct",
+                [
+                    {
+                        "tts_text": text,
+                        "instruct_text": instruct_text,
+                        "spk_id": spk_id,
+                        "stream": False,
+                    },
+                    {
+                        "text": text,
+                        "instruct_text": instruct_text,
+                        "spk_id": spk_id,
+                        "stream": False,
+                    },
+                ],
+                [
+                    (text, instruct_text),
+                ],
+            ),
+            (
+                "inference_sft",
+                [
+                    {
+                        "tts_text": text,
+                        "spk_id": spk_id,
+                        "stream": False,
+                    },
+                    {
+                        "text": text,
+                        "spk_id": spk_id,
+                        "stream": False,
+                    },
+                ],
+                [
+                    (text, spk_id),
+                ],
+            ),
+            (
+                "inference",
+                [
+                    kwargs,
+                ],
+                [
+                    (text,),
+                ],
+            ),
+        ]
+
+        for method, kwargs_patterns, args_patterns in planned_calls:
+            # If no speaker id is provided, skip SFT paths.
+            if method == "inference_sft" and not spk_id:
+                continue
             try:
-                outputs = self._call_if_supported(method, kwargs)
+                outputs = self._call_with_patterns(method, kwargs_patterns, args_patterns)
                 if outputs:
                     return [self._pick_wave_tensor(sample) for sample in outputs]
-            except Exception:
-                continue
+            except Exception as exc:  # noqa: BLE001
+                method_errors.append(f"{method}: {type(exc).__name__}: {exc}")
 
         # Last fallback: try call model directly as callable.
         if callable(self.model):
-            out = self.model(text=text, instruct_text=instruct_text)
-            samples = self._materialize_output(out)
-            return [self._pick_wave_tensor(sample) for sample in samples]
+            try:
+                out = self.model(text=text, instruct_text=instruct_text)
+                samples = self._materialize_output(out)
+                if samples:
+                    return [self._pick_wave_tensor(sample) for sample in samples]
+            except Exception as exc:  # noqa: BLE001
+                method_errors.append(f"__call__: {type(exc).__name__}: {exc}")
 
+        hint = ""
+        if prompt_speech_16k is None and "inference_instruct2" in available_methods:
+            hint = (
+                "Hint: current CosyVoice2 version may require a reference prompt audio for "
+                "`inference_instruct2`. Try passing `prompt_speech_16k` (or CLI --prompt_audio)."
+            )
+        error_block = "\n- ".join(method_errors[:8]) if method_errors else "No callable inference methods succeeded."
         raise RuntimeError(
             "No valid inference method found on loaded CosyVoice model. "
-            "Please check installed cosyvoice version."
+            "Please check installed cosyvoice version.\n"
+            f"Available inference methods: {available_methods}\n"
+            f"Method errors:\n- {error_block}" + ("\n" + hint if hint else "")
         )
 
 

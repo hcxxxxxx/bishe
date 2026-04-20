@@ -34,6 +34,8 @@ class SynthesisRequest:
     context: Optional[str] = None
     language: str = "zh"  # zh | en
     use_optimized_prompt: bool = True
+    prompt_audio_path: Optional[str] = None
+    spk_id: Optional[str] = None
 
 
 @dataclass
@@ -96,7 +98,9 @@ class EmotionTTSPipeline:
         waves = self.model_loader.synthesize(
             text=req.text,
             instruct_text=used_prompt,
+            prompt_speech_16k=req.prompt_audio_path,
             sample_rate=self.sample_rate,
+            extra_kwargs={"spk_id": req.spk_id} if req.spk_id else None,
         )
 
         if not waves:
@@ -135,6 +139,10 @@ class EmotionTTSPipeline:
             context=(str(row["context"]).strip() if row.get("context") else None),
             language=str(row.get("language", "zh")).strip().lower(),
             use_optimized_prompt=bool(row.get("use_optimized_prompt", use_optimized_prompt)),
+            prompt_audio_path=(
+                str(row.get("prompt_audio_path", row.get("prompt_audio", ""))).strip() or None
+            ),
+            spk_id=(str(row["spk_id"]).strip() if row.get("spk_id") else None),
         )
 
     def synthesize_batch(
@@ -193,6 +201,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--secondary_emotion", type=str, default="")
     parser.add_argument("--context", type=str, default="")
     parser.add_argument("--language", type=str, default="zh", choices=["zh", "en"])
+    parser.add_argument("--prompt_audio", type=str, default="", help="Reference wav for CosyVoice2 instruct2/zero-shot")
+    parser.add_argument("--spk_id", type=str, default="", help="Speaker id for SFT/instruct fallback if needed")
 
     # Batch inference args
     parser.add_argument("--batch_file", type=str, default="", help="Path to jsonl/csv batch file")
@@ -234,6 +244,8 @@ def main() -> None:
         context=args.context or None,
         language=args.language,
         use_optimized_prompt=use_optimized,
+        prompt_audio_path=args.prompt_audio or None,
+        spk_id=args.spk_id or None,
     )
     result = pipeline.synthesize_single(req)
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
