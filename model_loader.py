@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -53,11 +54,35 @@ class CosyVoiceModelLoader:
         self.model_dir = snapshot_download(
             repo_id=self.config.hf_repo_id,
             local_dir=str(local_dir),
-            local_dir_use_symlinks=False,
-            resume_download=True,
             force_download=force_download,
         )
         return self.model_dir
+
+    @staticmethod
+    def _maybe_prepare_cosyvoice_source_import() -> Optional[str]:
+        """Try adding an official CosyVoice source directory into sys.path.
+
+        This helps when users clone FunAudioLLM/CosyVoice locally rather than
+        using a pip package that exposes `cosyvoice.cli`.
+        """
+        candidates = [
+            os.getenv("COSYVOICE_REPO", ""),
+            "./third_party/CosyVoice",
+            "./CosyVoice",
+            "../CosyVoice",
+            "../../CosyVoice",
+        ]
+        for c in candidates:
+            if not c:
+                continue
+            p = Path(c).resolve()
+            marker = p / "cosyvoice" / "cli" / "cosyvoice.py"
+            if marker.exists():
+                p_str = str(p)
+                if p_str not in sys.path:
+                    sys.path.insert(0, p_str)
+                return p_str
+        return None
 
     def load_model(self, force_download: bool = False) -> Any:
         """Load CosyVoice2 model with best-effort API compatibility."""
@@ -67,6 +92,7 @@ class CosyVoiceModelLoader:
         model_dir = self.download_model(force_download=force_download)
 
         import_errors = []
+        source_path = self._maybe_prepare_cosyvoice_source_import()
 
         # Try canonical import path first.
         try:
@@ -101,10 +127,23 @@ class CosyVoiceModelLoader:
             import_errors.append(f"cosyvoice.CosyVoice2 failed: {exc}")
 
         msg = "\n".join(import_errors)
+        fix_hint = (
+            "Detected no usable `cosyvoice.cli` runtime. "
+            "Please install the official FunAudioLLM/CosyVoice runtime.\n"
+            "Recommended steps:\n"
+            "1) git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git\n"
+            "2) cd CosyVoice && git submodule update --init --recursive\n"
+            "3) pip install -r requirements.txt\n"
+            "4) export COSYVOICE_REPO=/absolute/path/to/CosyVoice\n"
+            "Then rerun this script.\n"
+        )
+        if source_path:
+            fix_hint += f"Already added source path into sys.path: {source_path}\n"
+
         raise RuntimeError(
             "Unable to load CosyVoice model. Checked multiple API paths.\n"
             f"Model dir: {model_dir}\n"
-            f"Errors:\n{msg}"
+            f"Errors:\n{msg}\n\n{fix_hint}"
         )
 
     @staticmethod

@@ -1,6 +1,7 @@
 torch>=2.1.0
 torchaudio>=2.1.0
-cosyvoice
+# Do NOT rely on `pip install cosyvoice` alone in production.
+# Install official runtime from FunAudioLLM/CosyVoice repo (see README).
 huggingface_hub>=0.24.0
 gradio>=4.0.0
 streamlit>=1.30.0

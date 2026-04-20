@@ -69,7 +69,20 @@ pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
 pip install -r requirements.txt
 ```
 
-### 2.5（可选）Hugging Face 镜像或代理
+### 2.5 安装官方 CosyVoice 运行时（重要）
+
+仅安装 `pip install cosyvoice` 在部分环境会缺少 `cosyvoice.cli`，建议按官方仓库方式安装：
+
+```bash
+git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git
+cd CosyVoice
+git submodule update --init --recursive
+pip install -r requirements.txt
+cd ..
+export COSYVOICE_REPO=$(realpath ./CosyVoice)
+```
+
+### 2.6（可选）Hugging Face 镜像或代理
 在网络受限环境可设置：
 
 ```bash
@@ -219,6 +232,8 @@ python demo.py
 `model_loader.py` 已实现多路径兼容加载与推理方法尝试（`inference_instruct2` / `inference_instruct` / `inference`）。
 若仍失败，请根据你服务器上的 cosyvoice 版本修改 `model_loader.py` 中方法优先级。
 
+若报错为 `No module named 'cosyvoice.cli'`，通常是运行时安装不完整。优先按“2.5 安装官方 CosyVoice 运行时”修复，并设置 `COSYVOICE_REPO` 环境变量。
+
 ### Q2: 为什么建议做 baseline vs optimized 对比？
 这是论文中验证提示词工程有效性的关键实验，能直观体现“细粒度控制”带来的收益。
 
@@ -227,4 +242,3 @@ python demo.py
 ## 9. 可用于论文的方法描述（简版）
 
 本系统采用基于自然语言指令的推理式情感控制方案，不对 TTS 主干进行参数更新。通过构建多层次 prompt 模板（情感类别、强度修饰、复合情感、上下文约束）引导 CosyVoice2-0.5B 生成目标风格语音，并通过客观指标（emotion2vec/SenseVoice）与主观 MOS 评分联合评估情感控制效果。
-
