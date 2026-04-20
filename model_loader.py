@@ -247,6 +247,8 @@ class CosyVoiceModelLoader:
             "instruction": instruct_text,
             "prompt_text": instruct_text,
             "prompt_speech_16k": prompt_speech_16k,
+            # Some CosyVoice2 versions use `prompt_wav` instead.
+            "prompt_wav": prompt_speech_16k,
             "sample_rate": sample_rate,
             "stream": False,
         }
@@ -266,12 +268,14 @@ class CosyVoiceModelLoader:
                     {
                         "tts_text": text,
                         "instruct_text": instruct_text,
+                        "prompt_wav": prompt_speech_16k,
                         "prompt_speech_16k": prompt_speech_16k,
                         "stream": False,
                     },
                     {
                         "text": text,
                         "instruct_text": instruct_text,
+                        "prompt_wav": prompt_speech_16k,
                         "prompt_speech_16k": prompt_speech_16k,
                         "stream": False,
                     },
@@ -297,12 +301,14 @@ class CosyVoiceModelLoader:
                     {
                         "tts_text": text,
                         "prompt_text": instruct_text,
+                        "prompt_wav": prompt_speech_16k,
                         "prompt_speech_16k": prompt_speech_16k,
                         "stream": False,
                     },
                     {
                         "text": text,
                         "prompt_text": instruct_text,
+                        "prompt_wav": prompt_speech_16k,
                         "prompt_speech_16k": prompt_speech_16k,
                         "stream": False,
                     },
@@ -385,7 +391,8 @@ class CosyVoiceModelLoader:
         if prompt_speech_16k is None and "inference_instruct2" in available_methods:
             hint = (
                 "Hint: current CosyVoice2 version may require a reference prompt audio for "
-                "`inference_instruct2`. Try passing `prompt_speech_16k` (or CLI --prompt_audio)."
+                "`inference_instruct2` (`prompt_wav` / `prompt_speech_16k`). "
+                "Try passing CLI `--prompt_audio`."
             )
         error_block = "\n- ".join(method_errors[:8]) if method_errors else "No callable inference methods succeeded."
         raise RuntimeError(
