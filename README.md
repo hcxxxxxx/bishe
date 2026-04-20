@@ -161,6 +161,10 @@ python inference_pipeline.py \
 - optimized prompt
 用于论文中的 A/B 对比实验。
 
+注意（CosyVoice2 重要）：
+- 对 `inference_instruct2` 而言，`instruct_text` 更接近“风格提示文本通道”，不要把目标 `text` 拼进 `instruct_text`。
+- 推荐将 `instruct_text` 写成简短风格描述（如“语气高兴、略紧张”），目标内容仅放在 `tts_text`。
+
 ---
 
 ## 5. 评估流程

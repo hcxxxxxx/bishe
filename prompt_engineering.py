@@ -28,24 +28,28 @@ INTENSITY_EN = {
 
 EMOTION_TEMPLATES = {
     "zh": {
-        "neutral": "用自然、平稳的语气说：{text}",
-        "happy": "用高兴、明亮且有感染力的语气说：{text}",
-        "sad": "用悲伤、低沉且克制的语气说：{text}",
-        "angry": "用生气但清晰克制的语气说：{text}",
-        "surprised": "用惊讶、语速略快且充满变化的语气说：{text}",
-        "fearful": "用紧张、谨慎并带有不安的语气说：{text}",
-        "gentle": "用温柔、放松且亲切的语气说：{text}",
-        "serious": "用严肃、庄重且清晰的语气说：{text}",
+        # IMPORTANT:
+        # For CosyVoice2 inference_instruct2, instruct_text is consumed as prompt_text.
+        # So do not include the target `text` itself in instruction; otherwise the
+        # model may read instruction content.
+        "neutral": "语气自然、平稳。",
+        "happy": "语气高兴、明亮且有感染力。",
+        "sad": "语气悲伤、低沉且克制。",
+        "angry": "语气生气但清晰克制。",
+        "surprised": "语气惊讶、语速略快且有变化。",
+        "fearful": "语气紧张、谨慎并带有不安。",
+        "gentle": "语气温柔、放松且亲切。",
+        "serious": "语气严肃、庄重且清晰。",
     },
     "en": {
-        "neutral": "Say the following in a natural and steady tone: {text}",
-        "happy": "Say the following in a cheerful, bright and engaging tone: {text}",
-        "sad": "Say the following in a sad, low and restrained tone: {text}",
-        "angry": "Say the following in an angry but controlled and clear tone: {text}",
-        "surprised": "Say the following in a surprised tone with dynamic variation: {text}",
-        "fearful": "Say the following in a tense and cautious tone: {text}",
-        "gentle": "Say the following in a gentle, relaxed and warm tone: {text}",
-        "serious": "Say the following in a serious, formal and clear tone: {text}",
+        "neutral": "Use a natural and steady tone.",
+        "happy": "Use a cheerful, bright and engaging tone.",
+        "sad": "Use a sad, low and restrained tone.",
+        "angry": "Use an angry but controlled and clear tone.",
+        "surprised": "Use a surprised tone with dynamic variation.",
+        "fearful": "Use a tense and cautious tone.",
+        "gentle": "Use a gentle, relaxed and warm tone.",
+        "serious": "Use a serious, formal and clear tone.",
     },
 }
 
@@ -90,8 +94,8 @@ class EmotionPromptEngineer:
         e = self._normalize_emotion(emotion)
 
         if lang == "zh":
-            return f"用{emotion}的语气说：{text}"
-        return f"Speak with a {e} emotion: {text}"
+            return f"语气为{emotion}。"
+        return f"Use {e} emotion."
 
     def build_intensity_modifier(self, intensity: str, language: Optional[str] = None) -> str:
         """Convert intensity tag to natural language modifier."""
@@ -167,7 +171,8 @@ class EmotionPromptEngineer:
             primary,
             EMOTION_TEMPLATES[lang]["neutral"],
         )
-        base_clause = base.format(text=text)
+        # Keep instruction concise and style-only for CosyVoice2 instruct2.
+        base_clause = base
         compound_clause = self.build_compound_emotion_clause(
             primary_emotion=primary_emotion,
             secondary_emotion=secondary_emotion,
