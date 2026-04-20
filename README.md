@@ -164,6 +164,7 @@ python inference_pipeline.py \
 注意（CosyVoice2 重要）：
 - 对 `inference_instruct2` 而言，`instruct_text` 更接近“风格提示文本通道”，不要把目标 `text` 拼进 `instruct_text`。
 - 推荐将 `instruct_text` 写成简短风格描述（如“语气高兴、略紧张”），目标内容仅放在 `tts_text`。
+- 本项目在 `model_loader.py` 中已做永久修复：自动为 `instruct_text` 添加 `<|endofprompt|>`，并在 instruct2/zero-shot 调用中默认 `text_frontend=False`，降低“读出指令文本”的风险。
 
 ---
 
@@ -176,6 +177,21 @@ python evaluation.py \
   --eval_file ./data/eval_samples.csv \
   --output_dir ./experiments
 ```
+
+### 5.1.1 情感倾向评估（对已有生成音频）
+
+如果你已经生成了 `outputs/metadata.jsonl`，可直接评估“预测情感分布与命中率”：
+
+```bash
+python evaluation.py \
+  --tendency_file ./outputs/metadata.jsonl \
+  --output_dir ./experiments
+```
+
+输出文件：
+- `emotion_tendency_results.csv`：每条音频的目标/预测情感
+- `emotion_tendency_summary.json`：分布统计与命中率
+- `emotion_tendency_confusion_matrix.csv`：混淆矩阵（若存在目标标签）
 
 ### 5.2 评估输出
 

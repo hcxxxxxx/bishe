@@ -88,6 +88,21 @@ class EmotionPromptEngineer:
         e = emotion.strip().lower()
         return alias.get(e, e)
 
+    @staticmethod
+    def _emotion_to_zh_label(emotion: str) -> str:
+        mapping = {
+            "neutral": "中性",
+            "happy": "高兴",
+            "sad": "悲伤",
+            "angry": "生气",
+            "surprised": "惊讶",
+            "fearful": "紧张",
+            "gentle": "温柔",
+            "serious": "严肃",
+        }
+        key = emotion.strip().lower()
+        return mapping.get(key, emotion)
+
     def build_baseline_prompt(self, text: str, emotion: str, language: Optional[str] = None) -> str:
         """Simple baseline prompt for A/B experiments."""
         lang = (language or self.config.language).lower()
@@ -120,9 +135,11 @@ class EmotionPromptEngineer:
         intensity_modifier = self.build_intensity_modifier(intensity, lang)
 
         if lang == "zh":
+            primary_zh = self._emotion_to_zh_label(primary)
+            secondary_zh = self._emotion_to_zh_label(secondary) if secondary else None
             if secondary:
-                return f"整体情绪以{primary_emotion}为主，并{intensity_modifier}带有{secondary_emotion}。"
-            return f"请表现出{intensity_modifier}的{primary_emotion}情绪。"
+                return f"整体情绪以{primary_zh}为主，并{intensity_modifier}带有{secondary_zh}。"
+            return f"请表现出{intensity_modifier}的{primary_zh}情绪。"
 
         if secondary:
             return (

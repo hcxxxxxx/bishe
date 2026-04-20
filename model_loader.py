@@ -34,6 +34,7 @@ class ModelConfig:
 
 class CosyVoiceModelLoader:
     """Download, load and run inference on CosyVoice2 model."""
+    END_OF_PROMPT_TOKEN = "<|endofprompt|>"
 
     def __init__(self, config: Optional[ModelConfig] = None) -> None:
         self.config = config or ModelConfig()
@@ -224,6 +225,20 @@ class CosyVoiceModelLoader:
 
         raise RuntimeError("; ".join(errors) if errors else "No valid output returned.")
 
+    @classmethod
+    def _normalize_instruct_text(cls, instruct_text: str) -> str:
+        """Normalize instruction text for CosyVoice2 instruct-style APIs.
+
+        In several CosyVoice2 builds, instruct_text is treated as prompt text and
+        may be spoken out. Appending <|endofprompt|> helps stop leakage.
+        """
+        text = (instruct_text or "").strip()
+        if not text:
+            return cls.END_OF_PROMPT_TOKEN
+        if text.endswith(cls.END_OF_PROMPT_TOKEN):
+            return text
+        return f"{text}{cls.END_OF_PROMPT_TOKEN}"
+
     def synthesize(
         self,
         text: str,
@@ -239,13 +254,14 @@ class CosyVoiceModelLoader:
         """
         if self.model is None:
             self.load_model()
+        normalized_instruct_text = self._normalize_instruct_text(instruct_text)
 
         kwargs: Dict[str, Any] = {
             "text": text,
             "tts_text": text,
-            "instruct_text": instruct_text,
-            "instruction": instruct_text,
-            "prompt_text": instruct_text,
+            "instruct_text": normalized_instruct_text,
+            "instruction": normalized_instruct_text,
+            "prompt_text": normalized_instruct_text,
             "prompt_speech_16k": prompt_speech_16k,
             # Some CosyVoice2 versions use `prompt_wav` instead.
             "prompt_wav": prompt_speech_16k,
@@ -267,32 +283,36 @@ class CosyVoiceModelLoader:
                 [
                     {
                         "tts_text": text,
-                        "instruct_text": instruct_text,
+                        "instruct_text": normalized_instruct_text,
                         "prompt_wav": prompt_speech_16k,
                         "prompt_speech_16k": prompt_speech_16k,
                         "stream": False,
+                        "text_frontend": False,
                     },
                     {
                         "text": text,
-                        "instruct_text": instruct_text,
+                        "instruct_text": normalized_instruct_text,
                         "prompt_wav": prompt_speech_16k,
                         "prompt_speech_16k": prompt_speech_16k,
                         "stream": False,
+                        "text_frontend": False,
                     },
                     {
                         "tts_text": text,
-                        "instruct_text": instruct_text,
+                        "instruct_text": normalized_instruct_text,
                         "stream": False,
+                        "text_frontend": False,
                     },
                     {
                         "text": text,
-                        "instruct_text": instruct_text,
+                        "instruct_text": normalized_instruct_text,
                         "stream": False,
+                        "text_frontend": False,
                     },
                 ],
                 [
-                    (text, instruct_text, prompt_speech_16k),
-                    (text, instruct_text),
+                    (text, normalized_instruct_text, prompt_speech_16k),
+                    (text, normalized_instruct_text),
                 ],
             ),
             (
@@ -300,21 +320,23 @@ class CosyVoiceModelLoader:
                 [
                     {
                         "tts_text": text,
-                        "prompt_text": instruct_text,
+                        "prompt_text": normalized_instruct_text,
                         "prompt_wav": prompt_speech_16k,
                         "prompt_speech_16k": prompt_speech_16k,
                         "stream": False,
+                        "text_frontend": False,
                     },
                     {
                         "text": text,
-                        "prompt_text": instruct_text,
+                        "prompt_text": normalized_instruct_text,
                         "prompt_wav": prompt_speech_16k,
                         "prompt_speech_16k": prompt_speech_16k,
                         "stream": False,
+                        "text_frontend": False,
                     },
                 ],
                 [
-                    (text, instruct_text, prompt_speech_16k),
+                    (text, normalized_instruct_text, prompt_speech_16k),
                 ],
             ),
             (
@@ -322,19 +344,19 @@ class CosyVoiceModelLoader:
                 [
                     {
                         "tts_text": text,
-                        "instruct_text": instruct_text,
+                        "instruct_text": normalized_instruct_text,
                         "spk_id": spk_id,
                         "stream": False,
                     },
                     {
                         "text": text,
-                        "instruct_text": instruct_text,
+                        "instruct_text": normalized_instruct_text,
                         "spk_id": spk_id,
                         "stream": False,
                     },
                 ],
                 [
-                    (text, instruct_text),
+                    (text, normalized_instruct_text),
                 ],
             ),
             (
@@ -380,7 +402,7 @@ class CosyVoiceModelLoader:
         # Last fallback: try call model directly as callable.
         if callable(self.model):
             try:
-                out = self.model(text=text, instruct_text=instruct_text)
+                out = self.model(text=text, instruct_text=normalized_instruct_text)
                 samples = self._materialize_output(out)
                 if samples:
                     return [self._pick_wave_tensor(sample) for sample in samples]

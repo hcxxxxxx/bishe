@@ -11,12 +11,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import confusion_matrix
 from sklearn.metrics.pairwise import cosine_similarity
 
 from inference_pipeline import EmotionTTSPipeline, SynthesisRequest
@@ -249,10 +251,85 @@ class ExperimentRunner:
         print(f"Saved MOS template to: {mos_path.resolve()}")
         return mos_path
 
+    @staticmethod
+    def _load_tendency_rows(path: str) -> List[Dict[str, Any]]:
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(path)
+        if p.suffix.lower() == ".jsonl":
+            return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if p.suffix.lower() == ".csv":
+            return pd.read_csv(p).to_dict(orient="records")
+        raise ValueError("tendency_file should be jsonl or csv")
+
+    def evaluate_emotion_tendency(self, tendency_file: str) -> Path:
+        """Evaluate emotion tendency on generated audios.
+
+        Input file can be:
+        - outputs/metadata.jsonl from inference_pipeline.py
+        - custom csv/jsonl with at least `audio_path`
+        Optional target columns:
+        - `primary_emotion` or `target_emotion`
+        """
+        rows = self._load_tendency_rows(tendency_file)
+        records: List[Dict[str, Any]] = []
+        target_list: List[str] = []
+        pred_list: List[str] = []
+
+        for row in rows:
+            audio_path = row.get("audio_path")
+            if not audio_path:
+                continue
+
+            target = (
+                row.get("target_emotion")
+                or row.get("primary_emotion")
+                or (row.get("request") or {}).get("primary_emotion")
+            )
+            predicted = self.evaluator.parse_sensevoice_emotion(str(audio_path))
+            records.append(
+                {
+                    "audio_path": audio_path,
+                    "target_emotion": target,
+                    "predicted_emotion": predicted,
+                    "match": bool(target and predicted and str(target).lower() == str(predicted).lower()),
+                }
+            )
+            if target and predicted:
+                target_list.append(str(target).lower())
+                pred_list.append(str(predicted).lower())
+
+        df = pd.DataFrame(records)
+        detail_path = self.output_dir / "emotion_tendency_results.csv"
+        df.to_csv(detail_path, index=False, encoding="utf-8-sig")
+
+        summary = {
+            "num_samples": int(len(df)),
+            "num_with_target_and_prediction": int(len(target_list)),
+            "prediction_distribution": dict(Counter([str(x).lower() for x in df["predicted_emotion"].dropna().tolist()])),
+        }
+        if target_list:
+            acc = float(np.mean([t == p for t, p in zip(target_list, pred_list)]))
+            summary["target_match_accuracy"] = acc
+
+            labels = sorted(set(target_list + pred_list))
+            cm = confusion_matrix(target_list, pred_list, labels=labels)
+            cm_df = pd.DataFrame(cm, index=[f"target_{l}" for l in labels], columns=[f"pred_{l}" for l in labels])
+            cm_path = self.output_dir / "emotion_tendency_confusion_matrix.csv"
+            cm_df.to_csv(cm_path, encoding="utf-8-sig")
+            summary["confusion_matrix_csv"] = str(cm_path.resolve())
+
+        summary_path = self.output_dir / "emotion_tendency_summary.json"
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"Saved tendency detail to: {detail_path.resolve()}")
+        print(f"Saved tendency summary to: {summary_path.resolve()}")
+        return detail_path
+
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluation for emotion-controllable TTS")
-    parser.add_argument("--eval_file", type=str, required=True, help="Path to eval csv/jsonl")
+    parser.add_argument("--eval_file", type=str, default="", help="Path to eval csv/jsonl for prompt comparison")
+    parser.add_argument("--tendency_file", type=str, default="", help="Path to csv/jsonl for emotion tendency evaluation")
     parser.add_argument("--output_dir", type=str, default="./experiments")
     return parser
 
@@ -260,6 +337,11 @@ def build_argparser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_argparser().parse_args()
     runner = ExperimentRunner(output_dir=args.output_dir)
+    if args.tendency_file:
+        runner.evaluate_emotion_tendency(args.tendency_file)
+        return
+    if not args.eval_file:
+        raise ValueError("Either --eval_file or --tendency_file must be provided.")
     samples = runner.load_eval_samples(args.eval_file)
     df = runner.run_prompt_comparison(samples)
     runner.generate_mos_template(df)
