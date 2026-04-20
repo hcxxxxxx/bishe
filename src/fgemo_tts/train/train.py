@@ -1,8 +1,30 @@
 import argparse
 import glob
 import os
+from pathlib import Path
 
 from fgemo_tts.models.cosyvoice_adapter import CosyVoice2BackboneAdapter, CosyVoiceTrainArgs
+
+
+def looks_like_cosyvoice_model_dir(p: str) -> bool:
+    req = ["llm.pt", "flow.pt", "cosyvoice2.yaml"]
+    return os.path.isdir(p) and all(os.path.exists(os.path.join(p, x)) for x in req)
+
+
+def auto_find_cosyvoice_model_dir(cosyvoice_root: str) -> str:
+    pretrained_root = os.path.join(cosyvoice_root, "pretrained_models")
+    if not os.path.isdir(pretrained_root):
+        return ""
+    # Common explicit default first.
+    direct = os.path.join(pretrained_root, "CosyVoice2-0.5B")
+    if looks_like_cosyvoice_model_dir(direct):
+        return direct
+    # Then search for any directory containing cosyvoice2.yaml + checkpoints.
+    for cand in Path(pretrained_root).glob("**/cosyvoice2.yaml"):
+        model_dir = str(cand.parent)
+        if looks_like_cosyvoice_model_dir(model_dir):
+            return model_dir
+    return ""
 
 
 def resolve_checkpoint(model_dir: str, model: str) -> str:
@@ -20,6 +42,7 @@ def main():
     ap = argparse.ArgumentParser(description="Launch real CosyVoice2 training via official train.py")
     ap.add_argument("--cosyvoice_root", type=str, default="../CosyVoice")
     ap.add_argument("--cosyvoice_model_dir", type=str, default="../CosyVoice/pretrained_models/CosyVoice2-0.5B")
+    ap.add_argument("--qwen_pretrain_path", type=str, default="")
     ap.add_argument("--ablation", type=str, default="full", choices=["none", "rule_only", "full"])
     ap.add_argument("--models", type=str, default="llm,flow", help="comma-separated subset of llm,flow,hifigan")
     ap.add_argument("--config", type=str, default="../CosyVoice/examples/libritts/cosyvoice2/conf/cosyvoice2.yaml")
@@ -43,8 +66,17 @@ def main():
 
     if not os.path.isdir(cosyvoice_root):
         raise FileNotFoundError(f"cosyvoice_root not found: {cosyvoice_root}")
-    if not os.path.isdir(cosyvoice_model_dir):
-        raise FileNotFoundError(f"cosyvoice_model_dir not found: {cosyvoice_model_dir}")
+    if not looks_like_cosyvoice_model_dir(cosyvoice_model_dir):
+        auto_dir = auto_find_cosyvoice_model_dir(cosyvoice_root)
+        if auto_dir:
+            print(f"[auto-detect] use cosyvoice_model_dir: {auto_dir}")
+            cosyvoice_model_dir = os.path.abspath(auto_dir)
+        else:
+            raise FileNotFoundError(
+                f"cosyvoice_model_dir not found or incomplete: {cosyvoice_model_dir}\n"
+                f"Please check pretrained files under: {os.path.join(cosyvoice_root, 'pretrained_models')}\n"
+                "Expected files include: cosyvoice2.yaml, llm.pt, flow.pt, hift.pt, campplus.onnx."
+            )
     if not os.path.isfile(config):
         raise FileNotFoundError(f"config not found: {config}")
 
@@ -62,7 +94,7 @@ def main():
     if not os.path.isfile(cv_data):
         raise FileNotFoundError(f"cv_data list not found: {cv_data}")
 
-    qwen_pretrain_path = os.path.join(cosyvoice_model_dir, "CosyVoice-BlankEN")
+    qwen_pretrain_path = os.path.abspath(args.qwen_pretrain_path) if args.qwen_pretrain_path else os.path.join(cosyvoice_model_dir, "CosyVoice-BlankEN")
     if not os.path.isdir(qwen_pretrain_path):
         raise FileNotFoundError(
             f"qwen pretrain dir missing: {qwen_pretrain_path}. "

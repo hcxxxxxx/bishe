@@ -142,7 +142,9 @@ class CosyVoice2BackboneAdapter(TTSBackboneBase):
             raise FileNotFoundError(f"CosyVoice train.py not found: {train_py}")
 
         cmd = [
-            "torchrun",
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
             "--nnodes=1",
             f"--nproc_per_node={nproc_per_node}",
             f"--rdzv_id={random.randint(1000, 9999)}",
