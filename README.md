@@ -1,71 +1,77 @@
-# Fine-grained Emotion Prompt Controlled TTS (FGEmo-TTS)
+# FGEmo-TTS (CosyVoice2 Real Pipeline)
 
-本项目用于本科毕业论文实现：基于自然语言 prompt 的细粒度情感可控 TTS。
+本仓库已切换为真实 CosyVoice2 训练/推理流程（不再使用 mock 声学目标或 mock 推理）。
 
-## 1. 核心设计
-- `prompt_parser.py`: 把自然语言情感描述解析为结构化条件（emotion/intensity/arousal/valence/style）。
-- `prompt_encoder.py`: 把结构化条件映射为条件向量。
-- `prompt_control_model.py`: 使用 FiLM 风格 adaptor（gamma/beta）把条件注入 backbone 隐层。
-- `train.py`: 支持 ablation：`none` / `rule_only` / `full`。
-- `f5_adapter.py`: 真实 F5-TTS 的接入模板（你需要按你本地 F5 代码补 forward/infer）。
+固定目录关系：
+- 当前仓库：`bishe`
+- CosyVoice2 代码：`../CosyVoice`
+- ESD 数据：`../dataset_esd_sorted`
 
-## 2. 目录
-- `src/fgemo_tts/`: 主代码
-- `scripts/build_manifest_from_esd_emoemilia.py`: ESD + Emo-Emilia 清单构建
-- `scripts/run_ablation_8gpu.sh`: 8 卡 ablation 一键运行
+## 1) 关键入口
+- 真实训练编排：[src/fgemo_tts/train/train.py](src/fgemo_tts/train/train.py)
+- 真实推理入口：[src/fgemo_tts/infer/infer.py](src/fgemo_tts/infer/infer.py)
+- CosyVoice 适配器：[src/fgemo_tts/models/cosyvoice_adapter.py](src/fgemo_tts/models/cosyvoice_adapter.py)
+- ESD -> CosyVoice 数据准备：[scripts/prepare_cosyvoice_esd_data.py](scripts/prepare_cosyvoice_esd_data.py)
+- 一键数据准备：[scripts/run_prepare_esd.sh](scripts/run_prepare_esd.sh)
+- 8卡 ablation：[scripts/run_ablation_8gpu.sh](scripts/run_ablation_8gpu.sh)
+- 组装可推理模型目录：[scripts/assemble_cosyvoice_model.py](scripts/assemble_cosyvoice_model.py)
 
-## 3. 环境
+## 2) 环境
 ```bash
 cd /Users/hcx/Desktop/毕业论文/code2/bishe
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install -r ../CosyVoice/requirements.txt
 ```
 
-## 4. 生成训练清单（ESD + Emo-Emilia）
+## 3) 数据准备（ESD）
 ```bash
-mkdir -p data/manifests
-python scripts/build_manifest_from_esd_emoemilia.py \
-  --esd_root /path/to/esd \
-  --emoemilia_root /path/to/emo-emilia \
-  --text_table /path/to/utt_text_table.txt \
-  --out_train data/manifests/train.jsonl \
-  --out_val data/manifests/val.jsonl
+bash scripts/run_prepare_esd.sh ../dataset_esd_sorted ../CosyVoice data/cosyvoice_esd
 ```
 
-`--text_table` 是可选，格式为 `utt_id|text`。
+会自动生成三组 ablation 数据：
+- `data/cosyvoice_esd/none/...`
+- `data/cosyvoice_esd/rule_only/...`
+- `data/cosyvoice_esd/full/...`
 
-## 5. Debug 单卡训练
+每组都包含 `train/dev` 的 kaldi 风格文件 + parquet `data.list`。
+
+## 4) 8x4090 训练 ablation（真实 CosyVoice）
+```bash
+bash scripts/run_ablation_8gpu.sh \
+  ../CosyVoice \
+  ../CosyVoice/pretrained_models/CosyVoice2-0.5B \
+  data/cosyvoice_esd \
+  exp/cosyvoice_esd \
+  llm,flow
+```
+
+## 5) 组装可推理模型目录
+训练后把最新 `llm/flow` checkpoint 覆盖到一个新模型目录：
+```bash
+python3 scripts/assemble_cosyvoice_model.py \
+  --base_model_dir ../CosyVoice/pretrained_models/CosyVoice2-0.5B \
+  --exp_root exp/cosyvoice_esd/full \
+  --output_model_dir exp/cosyvoice_esd/full_infer_model
+```
+
+## 6) 推理（自然语言情感 prompt）
 ```bash
 export PYTHONPATH=./src
-bash scripts/run_single_debug.sh
-```
-
-## 6. 8x4090 ablation 训练
-```bash
-export PYTHONPATH=./src
-bash scripts/run_ablation_8gpu.sh data/manifests/train.jsonl data/manifests/val.jsonl exp/ablation
-```
-
-## 7. 推理示例
-```bash
-export PYTHONPATH=./src
-python -m fgemo_tts.infer.infer \
-  --ckpt exp/ablation/full/last.pt \
-  --text "今天我们完成了毕业论文的核心系统实现。" \
+python3 -m fgemo_tts.infer.infer \
+  --cosyvoice_root ../CosyVoice \
+  --model_dir exp/cosyvoice_esd/full_infer_model \
+  --text "今天我们完成了毕业论文系统的核心实验。" \
   --prompt "请用略带悲伤但温柔的语气说这句话" \
-  --out_wav exp/demo/demo_prompt.wav
+  --speaker_wav ../dataset_esd_sorted/neutral/0001/0001_000001.wav \
+  --mode instruct2 \
+  --out_wav exp/demo/demo_full.wav
 ```
 
-## 8. 与真实 F5/CosyVoice2/XTTS 对接建议
-1. 先把你的真实 backbone 封装为 `TTSBackboneBase`。
-2. 在 hidden state 注入：`h = h * (1 + gamma) + beta`。
-3. 训练时先冻结 backbone，仅训练 prompt encoder + adaptor（建议 10k~20k steps）。
-4. 再逐步解冻 backbone 高层做联合微调。
+## 7) Ablation 定义
+- `none`：训练文本不加情感控制提示。
+- `rule_only`：训练文本用规则模板提示（情感类别固定映射）。
+- `full`：训练文本用更自然的提示模板（强度 + 风格）。
 
-## 9. Ablation 建议写法（论文）
-- `none`: 不使用情感 prompt（中性条件）。
-- `rule_only`: 使用规则条件向量，不训练 prompt encoder。
-- `full`: 规则解析 + 可训练 prompt encoder + adaptor。
-
-可报告指标：MCD、CER/WER、情感分类准确率（外部 SER 模型）、主观 MOS/CMOS。
+这三组只改 prompt 处理，不改 CosyVoice 主干，便于论文做可控变量实验。

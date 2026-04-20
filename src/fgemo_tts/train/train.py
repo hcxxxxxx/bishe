@@ -1,220 +1,127 @@
 import argparse
-import json
+import glob
 import os
-from dataclasses import asdict
 
-import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
-
-from fgemo_tts.config.schema import PromptCondition, TrainConfig
-from fgemo_tts.data.dataset import JsonlPromptTTSDataset, collate_fn
-from fgemo_tts.models.mock_backbone import MockTTSBackbone
-from fgemo_tts.models.prompt_control_model import PromptControlledTTS
-from fgemo_tts.models.rule_condition_encoder import RuleConditionEncoder
-from fgemo_tts.utils.seed import set_seed
+from fgemo_tts.models.cosyvoice_adapter import CosyVoice2BackboneAdapter, CosyVoiceTrainArgs
 
 
-def is_dist() -> bool:
-    return int(os.environ.get("WORLD_SIZE", "1")) > 1
-
-
-def init_dist():
-    if is_dist():
-        dist.init_process_group(backend="nccl")
-        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-
-
-def cleanup_dist():
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def get_rank() -> int:
-    return dist.get_rank() if dist.is_initialized() else 0
-
-
-def is_main() -> bool:
-    return get_rank() == 0
-
-
-def make_neutral_conds(n: int):
-    return [PromptCondition(emotion="中性", intensity=0.0, arousal=0.0, valence=0.0, style="自然") for _ in range(n)]
-
-
-def evaluate(model, val_loader, device, ablation: str, rule_encoder=None):
-    model.eval()
-    total = 0.0
-    cnt = 0
-    with torch.no_grad():
-        for text_tokens, acoustic, conds, _ in val_loader:
-            text_tokens = text_tokens.to(device)
-            acoustic = acoustic.to(device)
-
-            if ablation == "none":
-                conds_use = make_neutral_conds(len(conds))
-                out = model(text_tokens, acoustic, conds_use)
-            elif ablation == "rule_only":
-                cond_vec = rule_encoder(conds).to(device)
-                cond = model.module.adaptor(cond_vec) if isinstance(model, DDP) else model.adaptor(cond_vec)
-                backbone = model.module.backbone if isinstance(model, DDP) else model.backbone
-                out = backbone(text_tokens=text_tokens, acoustic=acoustic, cond=cond)
-            else:
-                out = model(text_tokens, acoustic, conds)
-
-            total += float(out["loss"].item())
-            cnt += 1
-    model.train()
-    return total / max(cnt, 1)
+def resolve_checkpoint(model_dir: str, model: str) -> str:
+    if model == "hifigan":
+        cands = [os.path.join(model_dir, "hifigan.pt"), os.path.join(model_dir, "hift.pt")]
+    else:
+        cands = [os.path.join(model_dir, f"{model}.pt")]
+    for p in cands:
+        if os.path.isfile(p):
+            return p
+    raise FileNotFoundError(f"No checkpoint found for model={model}, candidates={cands}")
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--train_manifest", type=str, required=True)
-    ap.add_argument("--val_manifest", type=str, required=True)
-    ap.add_argument("--output_dir", type=str, default="exp/fgemo")
-    ap.add_argument("--batch_size", type=int, default=12)
-    ap.add_argument("--num_workers", type=int, default=8)
-    ap.add_argument("--lr", type=float, default=2e-4)
-    ap.add_argument("--weight_decay", type=float, default=1e-4)
-    ap.add_argument("--max_steps", type=int, default=20000)
-    ap.add_argument("--log_every", type=int, default=50)
-    ap.add_argument("--eval_every", type=int, default=1000)
-    ap.add_argument("--save_every", type=int, default=1000)
+    ap = argparse.ArgumentParser(description="Launch real CosyVoice2 training via official train.py")
+    ap.add_argument("--cosyvoice_root", type=str, default="../CosyVoice")
+    ap.add_argument("--cosyvoice_model_dir", type=str, default="../CosyVoice/pretrained_models/CosyVoice2-0.5B")
     ap.add_argument("--ablation", type=str, default="full", choices=["none", "rule_only", "full"])
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--models", type=str, default="llm,flow", help="comma-separated subset of llm,flow,hifigan")
+    ap.add_argument("--config", type=str, default="../CosyVoice/examples/libritts/cosyvoice2/conf/cosyvoice2.yaml")
+    ap.add_argument("--train_data", type=str, default="")
+    ap.add_argument("--cv_data", type=str, default="")
+    ap.add_argument("--data_root", type=str, default="data/cosyvoice_esd")
+    ap.add_argument("--exp_root", type=str, default="exp/cosyvoice_esd")
+    ap.add_argument("--tensorboard_root", type=str, default="tensorboard/cosyvoice_esd")
+    ap.add_argument("--train_engine", type=str, default="torch_ddp", choices=["torch_ddp", "deepspeed"])
+    ap.add_argument("--deepspeed_config", type=str, default="../CosyVoice/examples/libritts/cosyvoice2/conf/ds_stage2.json")
+    ap.add_argument("--num_workers", type=int, default=8)
+    ap.add_argument("--prefetch", type=int, default=100)
+    ap.add_argument("--nproc_per_node", type=int, default=8)
+    ap.add_argument("--master_port", type=int, default=29511)
+    ap.add_argument("--cuda_visible_devices", type=str, default="0,1,2,3,4,5,6,7")
     args = ap.parse_args()
 
-    cfg = TrainConfig(
-        train_manifest=args.train_manifest,
-        val_manifest=args.val_manifest,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        max_steps=args.max_steps,
-        log_every=args.log_every,
-        eval_every=args.eval_every,
-        save_every=args.save_every,
-        output_dir=args.output_dir,
-        ablation=args.ablation,
-        seed=args.seed,
+    cosyvoice_root = os.path.abspath(args.cosyvoice_root)
+    cosyvoice_model_dir = os.path.abspath(args.cosyvoice_model_dir)
+    config = os.path.abspath(args.config)
+
+    if not os.path.isdir(cosyvoice_root):
+        raise FileNotFoundError(f"cosyvoice_root not found: {cosyvoice_root}")
+    if not os.path.isdir(cosyvoice_model_dir):
+        raise FileNotFoundError(f"cosyvoice_model_dir not found: {cosyvoice_model_dir}")
+    if not os.path.isfile(config):
+        raise FileNotFoundError(f"config not found: {config}")
+
+    if args.train_data:
+        train_data = os.path.abspath(args.train_data)
+    else:
+        train_data = os.path.abspath(os.path.join(args.data_root, args.ablation, "train", "parquet", "data.list"))
+    if args.cv_data:
+        cv_data = os.path.abspath(args.cv_data)
+    else:
+        cv_data = os.path.abspath(os.path.join(args.data_root, args.ablation, "dev", "parquet", "data.list"))
+
+    if not os.path.isfile(train_data):
+        raise FileNotFoundError(f"train_data list not found: {train_data}")
+    if not os.path.isfile(cv_data):
+        raise FileNotFoundError(f"cv_data list not found: {cv_data}")
+
+    qwen_pretrain_path = os.path.join(cosyvoice_model_dir, "CosyVoice-BlankEN")
+    if not os.path.isdir(qwen_pretrain_path):
+        raise FileNotFoundError(
+            f"qwen pretrain dir missing: {qwen_pretrain_path}. "
+            "Please download complete CosyVoice2-0.5B pretrained package first."
+        )
+
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    valid = {"llm", "flow", "hifigan"}
+    for m in models:
+        if m not in valid:
+            raise ValueError(f"unsupported model: {m}, expected one of {sorted(valid)}")
+
+    adapter = CosyVoice2BackboneAdapter(
+        cosyvoice_root=cosyvoice_root,
+        model_dir=cosyvoice_model_dir,
+        load_for_infer=False,
+        load_jit=False,
+        load_trt=False,
+        load_vllm=False,
+        fp16=False,
     )
 
-    set_seed(cfg.seed)
-    init_dist()
-    rank = get_rank()
-    device = torch.device(f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}" if torch.cuda.is_available() else "cpu")
+    env = {
+        "CUDA_VISIBLE_DEVICES": args.cuda_visible_devices,
+        "PYTHONPATH": f"{cosyvoice_root}:{os.path.join(cosyvoice_root, 'third_party', 'Matcha-TTS')}:{os.environ.get('PYTHONPATH', '')}",
+    }
 
-    train_ds = JsonlPromptTTSDataset(cfg.train_manifest)
-    val_ds = JsonlPromptTTSDataset(cfg.val_manifest)
+    for idx, model in enumerate(models):
+        ckpt = resolve_checkpoint(cosyvoice_model_dir, model)
+        out_dir = os.path.abspath(os.path.join(args.exp_root, args.ablation, model, args.train_engine))
+        tb_dir = os.path.abspath(os.path.join(args.tensorboard_root, args.ablation, model, args.train_engine))
 
-    train_sampler = DistributedSampler(train_ds, shuffle=True) if is_dist() else None
-    val_sampler = DistributedSampler(val_ds, shuffle=False) if is_dist() else None
+        train_args = CosyVoiceTrainArgs(
+            model=model,
+            config=config,
+            train_data=train_data,
+            cv_data=cv_data,
+            qwen_pretrain_path=qwen_pretrain_path,
+            onnx_path=cosyvoice_model_dir,
+            checkpoint=ckpt,
+            model_dir=out_dir,
+            tensorboard_dir=tb_dir,
+            train_engine=args.train_engine,
+            num_workers=args.num_workers,
+            prefetch=args.prefetch,
+            use_amp=True,
+            deepspeed_config=os.path.abspath(args.deepspeed_config),
+        )
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.batch_size,
-        sampler=train_sampler,
-        shuffle=(train_sampler is None),
-        num_workers=cfg.num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True,
-        drop_last=True,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.batch_size,
-        sampler=val_sampler,
-        shuffle=False,
-        num_workers=cfg.num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True,
-        drop_last=False,
-    )
+        adapter.launch_train_cmd(
+            train_args=train_args,
+            nproc_per_node=args.nproc_per_node,
+            master_port=args.master_port + idx,
+            env=env,
+        )
 
-    backbone = MockTTSBackbone(hidden_dim=256)
-    model = PromptControlledTTS(backbone=backbone, cond_dim=256, backbone_hidden_dim=512).to(device)
-    rule_encoder = RuleConditionEncoder(out_dim=256)
-
-    if cfg.ablation == "none":
-        for p in model.prompt_encoder.parameters():
-            p.requires_grad = False
-        for p in model.adaptor.parameters():
-            p.requires_grad = False
-
-    if cfg.ablation == "rule_only":
-        for p in model.prompt_encoder.parameters():
-            p.requires_grad = False
-
-    model_to_opt = model
-    if is_dist():
-        model = DDP(model, device_ids=[int(os.environ["LOCAL_RANK"])], find_unused_parameters=False)
-
-    params = [p for p in model_to_opt.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
-
-    os.makedirs(cfg.output_dir, exist_ok=True)
-    if is_main():
-        with open(os.path.join(cfg.output_dir, "train_config.json"), "w", encoding="utf-8") as f:
-            json.dump(asdict(cfg), f, ensure_ascii=False, indent=2)
-
-    global_step = 0
-    while global_step < cfg.max_steps:
-        if train_sampler is not None:
-            train_sampler.set_epoch(global_step)
-
-        for text_tokens, acoustic, conds, _ in train_loader:
-            text_tokens = text_tokens.to(device)
-            acoustic = acoustic.to(device)
-
-            if cfg.ablation == "none":
-                conds_use = make_neutral_conds(len(conds))
-                out = model(text_tokens, acoustic, conds_use)
-            elif cfg.ablation == "rule_only":
-                cond_vec = rule_encoder(conds).to(device)
-                cond = model.module.adaptor(cond_vec) if isinstance(model, DDP) else model.adaptor(cond_vec)
-                backbone = model.module.backbone if isinstance(model, DDP) else model.backbone
-                out = backbone(text_tokens=text_tokens, acoustic=acoustic, cond=cond)
-            else:
-                out = model(text_tokens, acoustic, conds)
-
-            loss = out["loss"]
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-
-            global_step += 1
-
-            if is_main() and global_step % cfg.log_every == 0:
-                print(f"[rank{rank}] step={global_step} loss={loss.item():.4f}")
-
-            if global_step % cfg.eval_every == 0:
-                val_loss = evaluate(model, val_loader, device, cfg.ablation, rule_encoder)
-                if is_main():
-                    print(f"[eval] step={global_step} val_loss={val_loss:.4f}")
-
-            if is_main() and global_step % cfg.save_every == 0:
-                core = model.module if isinstance(model, DDP) else model
-                ckpt = {
-                    "step": global_step,
-                    "model": core.state_dict(),
-                    "opt": opt.state_dict(),
-                    "ablation": cfg.ablation,
-                }
-                torch.save(ckpt, os.path.join(cfg.output_dir, f"ckpt_{global_step}.pt"))
-
-            if global_step >= cfg.max_steps:
-                break
-
-    if is_main():
-        core = model.module if isinstance(model, DDP) else model
-        torch.save({"step": global_step, "model": core.state_dict(), "ablation": cfg.ablation}, os.path.join(cfg.output_dir, "last.pt"))
-        print(f"training finished: {cfg.output_dir}")
-
-    cleanup_dist()
+        snapshots = sorted(glob.glob(os.path.join(out_dir, "epoch_*_whole.pt")))
+        if snapshots:
+            print(f"latest checkpoint for {model}: {snapshots[-1]}")
 
 
 if __name__ == "__main__":
