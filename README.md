@@ -22,11 +22,13 @@
 ├── model_loader.py            # 下载并加载 CosyVoice2-0.5B，兼容多版本 API
 ├── prompt_engineering.py      # 多层提示词工程：情感模板/强度/复合情感/优化
 ├── inference_pipeline.py      # 主推理流程（单句+批量），保存音频与元数据
+├── batch_intensity_inference.py # 批量强度对比推理（多句子/多场景 × 强度 × prompt模式）
 ├── evaluation.py              # 实验评估：prompt 对比 + emotion2vec/SenseVoice + MOS 模板
 ├── demo.py                    # Gradio 交互演示界面
 ├── data
 │   ├── batch_samples.jsonl    # 批量推理示例输入
-│   └── eval_samples.csv       # 评估示例输入
+│   ├── eval_samples.csv       # 评估示例输入
+│   └── intensity_scene_samples.jsonl # 强度对比批量示例
 ├── models/                    # 本地模型目录（自动下载）
 ├── outputs/                   # 推理输出
 ├── demo_outputs/              # demo 输出
@@ -135,6 +137,22 @@ python inference_pipeline.py \
   --prompt_mode optimized
 ```
 
+### 3.5 批量强度对比推理（推荐用于论文实验）
+
+```bash
+python batch_intensity_inference.py \
+  --input_file ./data/intensity_scene_samples.jsonl \
+  --output_dir ./outputs/intensity_batch \
+  --intensities slightly,moderately,very \
+  --prompt_modes baseline,optimized
+```
+
+输出：
+- `./outputs/intensity_batch/metadata.jsonl`（可直接作为 tendency 评估输入）
+- `./outputs/intensity_batch/run_plan.jsonl`
+- `./outputs/intensity_batch/run_results.jsonl`
+- `./outputs/intensity_batch/run_errors.jsonl`
+
 输出：
 - 音频：`./outputs/audio/*.wav`
 - 元数据：`./outputs/metadata.jsonl`
@@ -192,6 +210,7 @@ python evaluation.py \
 - `emotion_tendency_results.jsonl`：每条音频的目标/预测情感明细（结构化）
 - `emotion_tendency_results.txt`：对齐后的可读表格（终端/论文截图友好）
 - `emotion_tendency_summary.json`：分布统计、主情感命中率、复合情感宽松命中率、强度单调性通过率
+  - 新增 `monotonic_by_prompt_mode` 字段，分别统计 `baseline` 与 `optimized` 的单调性通过率
 - `emotion_tendency_confusion_matrix.txt`：主情感混淆矩阵（若存在目标标签）
 - `emotion_tendency_classification_report.json`：precision/recall/F1（若存在目标标签）
 - `emotion_tendency_intensity_groups.txt`：按同文本分组的强度单调性详情

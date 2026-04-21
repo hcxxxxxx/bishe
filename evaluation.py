@@ -358,6 +358,33 @@ class ExperimentRunner:
         return mapping.get(s, s)
 
     @staticmethod
+    def _normalize_prompt_mode(row: Dict[str, Any]) -> str:
+        """Resolve prompt mode from top-level fields or nested request."""
+        req = ExperimentRunner._safe_parse_request(row)
+
+        mode = row.get("prompt_mode")
+        if ExperimentRunner._is_missing(mode):
+            mode = req.get("prompt_mode")
+        if not ExperimentRunner._is_missing(mode):
+            s = str(mode).strip().lower()
+            if s in ("baseline", "optimized"):
+                return s
+
+        use_opt = row.get("use_optimized_prompt")
+        if ExperimentRunner._is_missing(use_opt):
+            use_opt = req.get("use_optimized_prompt")
+        if isinstance(use_opt, bool):
+            return "optimized" if use_opt else "baseline"
+        if isinstance(use_opt, str):
+            s = use_opt.strip().lower()
+            if s in ("1", "true", "yes", "y", "optimized"):
+                return "optimized"
+            if s in ("0", "false", "no", "n", "baseline"):
+                return "baseline"
+
+        return "unknown"
+
+    @staticmethod
     def _extract_audio_features(audio_path: str) -> Dict[str, float]:
         wav, sr = torchaudio.load(audio_path)
         if wav.ndim == 2 and wav.shape[0] > 1:
@@ -390,40 +417,59 @@ class ExperimentRunner:
     def _evaluate_intensity_monotonicity(df: pd.DataFrame) -> Tuple[Dict[str, Any], pd.DataFrame]:
         order = {"slightly": 0, "moderately": 1, "very": 2}
         intensity_rows: List[Dict[str, Any]] = []
-        total_groups = 0
-        pass_groups = 0
+        compare_cols = ["text", "target_primary_emotion", "target_secondary_emotion", "language"]
 
-        grouped = df.groupby(["text", "target_primary_emotion", "target_secondary_emotion", "language"], dropna=False)
-        for (text, p, s, lang), g in grouped:
-            sub = g.copy()
-            sub["intensity_order"] = sub["target_intensity"].map(order)
-            sub = sub.dropna(subset=["intensity_order", "intensity_proxy"])
-            if len(sub) < 2:
-                continue
+        def _calc(sub_df: pd.DataFrame, mode_label: str, collect_rows: bool = True) -> Dict[str, Any]:
+            total_groups = 0
+            pass_groups = 0
+            grouped = sub_df.groupby(compare_cols, dropna=False)
+            for (text, p, s, lang), g in grouped:
+                sub = g.copy()
+                sub["intensity_order"] = sub["target_intensity"].map(order)
+                sub = sub.dropna(subset=["intensity_order", "intensity_proxy"])
+                if len(sub) < 2:
+                    continue
 
-            total_groups += 1
-            sub = sub.sort_values("intensity_order")
-            vals = sub["intensity_proxy"].tolist()
-            intensities = sub["target_intensity"].tolist()
-            is_mono = all(vals[i] <= vals[i + 1] for i in range(len(vals) - 1))
-            if is_mono:
-                pass_groups += 1
+                total_groups += 1
+                sub = sub.sort_values("intensity_order")
+                vals = sub["intensity_proxy"].tolist()
+                intensities = sub["target_intensity"].tolist()
+                is_mono = all(vals[i] <= vals[i + 1] for i in range(len(vals) - 1))
+                if is_mono:
+                    pass_groups += 1
 
-            record = {
-                "text": text,
-                "target_primary_emotion": p,
-                "target_secondary_emotion": s,
-                "language": lang,
-                "intensity_sequence": " -> ".join(intensities),
-                "score_sequence": " -> ".join([f"{v:.3f}" for v in vals]),
-                "monotonic_pass": is_mono,
+                if collect_rows:
+                    intensity_rows.append(
+                        {
+                            "prompt_mode": mode_label,
+                            "text": text,
+                            "target_primary_emotion": p,
+                            "target_secondary_emotion": s,
+                            "language": lang,
+                            "intensity_sequence": " -> ".join(intensities),
+                            "score_sequence": " -> ".join([f"{v:.3f}" for v in vals]),
+                            "monotonic_pass": is_mono,
+                        }
+                    )
+
+            return {
+                "num_intensity_groups": total_groups,
+                "num_monotonic_pass_groups": pass_groups,
+                "monotonic_pass_rate": (pass_groups / total_groups) if total_groups > 0 else None,
             }
-            intensity_rows.append(record)
+
+        has_mode = "prompt_mode" in df.columns and df["prompt_mode"].notna().any()
+        overall_stats = _calc(df, "all", collect_rows=not has_mode)
+        by_mode: Dict[str, Any] = {}
+        if has_mode:
+            for mode, sub in df.groupby("prompt_mode", dropna=False):
+                by_mode[str(mode)] = _calc(sub, str(mode))
 
         summary = {
-            "num_intensity_groups": total_groups,
-            "num_monotonic_pass_groups": pass_groups,
-            "monotonic_pass_rate": (pass_groups / total_groups) if total_groups > 0 else None,
+            "num_intensity_groups": overall_stats["num_intensity_groups"],
+            "num_monotonic_pass_groups": overall_stats["num_monotonic_pass_groups"],
+            "monotonic_pass_rate": overall_stats["monotonic_pass_rate"],
+            "monotonic_by_prompt_mode": by_mode,
         }
         return summary, pd.DataFrame(intensity_rows)
 
@@ -457,6 +503,7 @@ class ExperimentRunner:
             if not audio_path:
                 continue
 
+            prompt_mode = self._normalize_prompt_mode(row)
             target_primary = self._normalize_emotion_label(
                 self._extract_field(row, "target_emotion", "target_primary_emotion", "primary_emotion")
             )
@@ -477,6 +524,7 @@ class ExperimentRunner:
                     "audio_path": audio_path,
                     "text": text,
                     "language": self._extract_field(row, "language"),
+                    "prompt_mode": prompt_mode,
                     "target_primary_emotion": target_primary,
                     "target_secondary_emotion": target_secondary,
                     "target_intensity": target_intensity,

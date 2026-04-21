@@ -1,0 +1,3 @@
+{"text":"收到录取通知后，我很开心，但也有一点紧张。", "primary_emotion":"happy", "secondary_emotion":"fearful", "context":"和家人分享录取结果", "language":"zh", "prompt_audio":"./data/prompt_16k.wav"}
+{"text":"项目终于完成了，我松了一口气，但内心还带着一点疲惫。", "primary_emotion":"happy", "secondary_emotion":"sad", "context":"深夜复盘项目收尾", "language":"zh", "prompt_audio":"./data/prompt_16k.wav"}
+{"text":"I am proud of our result, but I still feel a little worried about tomorrow.", "primary_emotion":"happy", "secondary_emotion":"fearful", "context":"after presenting to the team", "language":"en", "prompt_audio":"./data/prompt_16k.wav"}
