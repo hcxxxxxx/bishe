@@ -189,20 +189,26 @@ python evaluation.py \
 ```
 
 输出文件：
-- `emotion_tendency_results.csv`：每条音频的目标/预测情感
-- `emotion_tendency_summary.json`：分布统计与命中率
-- `emotion_tendency_confusion_matrix.csv`：混淆矩阵（若存在目标标签）
+- `emotion_tendency_results.jsonl`：每条音频的目标/预测情感明细（结构化）
+- `emotion_tendency_results.txt`：对齐后的可读表格（终端/论文截图友好）
+- `emotion_tendency_summary.json`：分布统计、主情感命中率、复合情感宽松命中率、强度单调性通过率
+- `emotion_tendency_confusion_matrix.txt`：主情感混淆矩阵（若存在目标标签）
+- `emotion_tendency_classification_report.json`：precision/recall/F1（若存在目标标签）
+- `emotion_tendency_intensity_groups.txt`：按同文本分组的强度单调性详情
 
 ### 5.2 评估输出
 
-- `./experiments/prompt_comparison_results.csv`
+- `./experiments/prompt_comparison_results.jsonl`
+  - 结构化对比结果，便于后处理
+- `./experiments/prompt_comparison_results.txt`
   - baseline 与 optimized 的音频路径
   - 对应 prompt
   - 可选 emotion2vec 相似度指标
   - 可选 SenseVoice 情感标签解析结果
 
-- `./experiments/mos_template.csv`
-  - 主观评分模板（自然度、情感准确度、强度匹配）
+- `./experiments/mos_template.jsonl`
+- `./experiments/mos_template.txt`
+  - 主观评分模板（自然度、情感准确度、强度匹配，已对齐便于查看）
 
 ### 5.3 关于 emotion2vec / SenseVoice
 

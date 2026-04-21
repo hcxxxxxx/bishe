@@ -9,15 +9,18 @@ Includes:
 from __future__ import annotations
 
 import argparse
-import csv
+import ast
 import json
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import torch
+import torchaudio
+from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -116,6 +119,16 @@ class ExperimentRunner:
         self.evaluator = EmotionAutoEvaluator()
 
     @staticmethod
+    def _save_df_txt(df: pd.DataFrame, path: Path) -> Path:
+        """Save aligned plain-text table for terminal-friendly reading."""
+        if len(df) == 0:
+            path.write_text("(empty)\n", encoding="utf-8")
+            return path
+        text = df.to_string(index=False, max_colwidth=120)
+        path.write_text(text + "\n", encoding="utf-8")
+        return path
+
+    @staticmethod
     def load_eval_samples(path: str) -> List[EvalSample]:
         p = Path(path)
         if not p.exists():
@@ -194,14 +207,20 @@ class ExperimentRunner:
             )
 
         df = pd.DataFrame(records)
-        save_path = self.output_dir / "prompt_comparison_results.csv"
-        df.to_csv(save_path, index=False, encoding="utf-8-sig")
-        print(f"Saved comparison results to: {save_path.resolve()}")
+        jsonl_path = self.output_dir / "prompt_comparison_results.jsonl"
+        txt_path = self.output_dir / "prompt_comparison_results.txt"
+        with jsonl_path.open("w", encoding="utf-8") as f:
+            for row in df.to_dict(orient="records"):
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        self._save_df_txt(df, txt_path)
+        print(f"Saved comparison results to: {jsonl_path.resolve()}")
+        print(f"Saved comparison table to: {txt_path.resolve()}")
         return df
 
     def generate_mos_template(self, df: pd.DataFrame) -> Path:
-        """Create a MOS evaluation form template (CSV)."""
-        mos_path = self.output_dir / "mos_template.csv"
+        """Create a MOS evaluation form template (JSONL + TXT)."""
+        mos_jsonl_path = self.output_dir / "mos_template.jsonl"
+        mos_txt_path = self.output_dir / "mos_template.txt"
         headers = [
             "sample_id",
             "text",
@@ -243,13 +262,170 @@ class ExperimentRunner:
                 }
             )
 
-        with mos_path.open("w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=headers)
-            writer.writeheader()
-            writer.writerows(rows)
+        with mos_jsonl_path.open("w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        self._save_df_txt(pd.DataFrame(rows, columns=headers), mos_txt_path)
 
-        print(f"Saved MOS template to: {mos_path.resolve()}")
-        return mos_path
+        print(f"Saved MOS template to: {mos_jsonl_path.resolve()}")
+        print(f"Saved MOS table to: {mos_txt_path.resolve()}")
+        return mos_jsonl_path
+
+    @staticmethod
+    def _is_missing(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, float) and np.isnan(value):
+            return True
+        if isinstance(value, str) and not value.strip():
+            return True
+        return False
+
+    @staticmethod
+    def _safe_parse_request(row: Dict[str, Any]) -> Dict[str, Any]:
+        req = row.get("request")
+        if isinstance(req, dict):
+            return req
+        if isinstance(req, str):
+            s = req.strip()
+            if not s:
+                return {}
+            for parser in (json.loads, ast.literal_eval):
+                try:
+                    obj = parser(s)
+                    if isinstance(obj, dict):
+                        return obj
+                except Exception:
+                    continue
+        return {}
+
+    @classmethod
+    def _extract_field(cls, row: Dict[str, Any], *keys: str) -> Any:
+        req = cls._safe_parse_request(row)
+        for key in keys:
+            val = row.get(key)
+            if not cls._is_missing(val):
+                return val
+        for key in keys:
+            val = req.get(key)
+            if not cls._is_missing(val):
+                return val
+        return None
+
+    @staticmethod
+    def _normalize_emotion_label(label: Optional[str]) -> Optional[str]:
+        if label is None:
+            return None
+        s = str(label).strip().lower()
+        if not s:
+            return None
+        mapping = {
+            "开心": "happy",
+            "高兴": "happy",
+            "愉快": "happy",
+            "伤心": "sad",
+            "悲伤": "sad",
+            "难过": "sad",
+            "愤怒": "angry",
+            "生气": "angry",
+            "惊讶": "surprised",
+            "紧张": "fearful",
+            "害怕": "fearful",
+            "恐惧": "fearful",
+            "温柔": "gentle",
+            "严肃": "serious",
+            "中性": "neutral",
+        }
+        return mapping.get(s, s)
+
+    @staticmethod
+    def _normalize_intensity_label(label: Optional[str]) -> Optional[str]:
+        if label is None:
+            return None
+        s = str(label).strip().lower()
+        if not s:
+            return None
+        mapping = {
+            "轻微": "slightly",
+            "略微": "slightly",
+            "稍微": "slightly",
+            "适度": "moderately",
+            "中等": "moderately",
+            "中度": "moderately",
+            "非常": "very",
+            "强烈": "very",
+        }
+        return mapping.get(s, s)
+
+    @staticmethod
+    def _extract_audio_features(audio_path: str) -> Dict[str, float]:
+        wav, sr = torchaudio.load(audio_path)
+        if wav.ndim == 2 and wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        wav = wav.float()
+        duration_sec = float(wav.shape[-1] / max(sr, 1))
+        rms = float(torch.sqrt(torch.mean(wav**2) + 1e-9))
+        rms_db = float(20.0 * np.log10(max(rms, 1e-6)))
+        peak = float(torch.max(torch.abs(wav)))
+        if wav.shape[-1] > 1:
+            zcr = float(torch.mean((wav[:, 1:] * wav[:, :-1] < 0).float()))
+        else:
+            zcr = 0.0
+        return {
+            "duration_sec": duration_sec,
+            "rms_db": rms_db,
+            "peak_abs": peak,
+            "zcr": zcr,
+        }
+
+    @staticmethod
+    def _intensity_proxy_score(features: Dict[str, float], text: str) -> float:
+        duration = max(features.get("duration_sec", 0.0), 1e-4)
+        text_len = len((text or "").strip())
+        speech_rate = text_len / duration
+        # Simple interpretable proxy: louder + faster + more dynamic => stronger.
+        return float(features.get("rms_db", -60.0) + 0.05 * speech_rate + 10.0 * features.get("zcr", 0.0))
+
+    @staticmethod
+    def _evaluate_intensity_monotonicity(df: pd.DataFrame) -> Tuple[Dict[str, Any], pd.DataFrame]:
+        order = {"slightly": 0, "moderately": 1, "very": 2}
+        intensity_rows: List[Dict[str, Any]] = []
+        total_groups = 0
+        pass_groups = 0
+
+        grouped = df.groupby(["text", "target_primary_emotion", "target_secondary_emotion", "language"], dropna=False)
+        for (text, p, s, lang), g in grouped:
+            sub = g.copy()
+            sub["intensity_order"] = sub["target_intensity"].map(order)
+            sub = sub.dropna(subset=["intensity_order", "intensity_proxy"])
+            if len(sub) < 2:
+                continue
+
+            total_groups += 1
+            sub = sub.sort_values("intensity_order")
+            vals = sub["intensity_proxy"].tolist()
+            intensities = sub["target_intensity"].tolist()
+            is_mono = all(vals[i] <= vals[i + 1] for i in range(len(vals) - 1))
+            if is_mono:
+                pass_groups += 1
+
+            record = {
+                "text": text,
+                "target_primary_emotion": p,
+                "target_secondary_emotion": s,
+                "language": lang,
+                "intensity_sequence": " -> ".join(intensities),
+                "score_sequence": " -> ".join([f"{v:.3f}" for v in vals]),
+                "monotonic_pass": is_mono,
+            }
+            intensity_rows.append(record)
+
+        summary = {
+            "num_intensity_groups": total_groups,
+            "num_monotonic_pass_groups": pass_groups,
+            "monotonic_pass_rate": (pass_groups / total_groups) if total_groups > 0 else None,
+        }
+        return summary, pd.DataFrame(intensity_rows)
 
     @staticmethod
     def _load_tendency_rows(path: str) -> List[Dict[str, Any]]:
@@ -273,7 +449,7 @@ class ExperimentRunner:
         """
         rows = self._load_tendency_rows(tendency_file)
         records: List[Dict[str, Any]] = []
-        target_list: List[str] = []
+        target_primary_list: List[str] = []
         pred_list: List[str] = []
 
         for row in rows:
@@ -281,49 +457,91 @@ class ExperimentRunner:
             if not audio_path:
                 continue
 
-            target = (
-                row.get("target_emotion")
-                or row.get("primary_emotion")
-                or (row.get("request") or {}).get("primary_emotion")
+            target_primary = self._normalize_emotion_label(
+                self._extract_field(row, "target_emotion", "target_primary_emotion", "primary_emotion")
             )
+            target_secondary = self._normalize_emotion_label(
+                self._extract_field(row, "target_secondary_emotion", "secondary_emotion")
+            )
+            target_intensity = self._normalize_intensity_label(
+                self._extract_field(row, "target_intensity", "intensity")
+            )
+            text = str(self._extract_field(row, "text") or "")
             predicted = self.evaluator.parse_sensevoice_emotion(str(audio_path))
+            predicted = self._normalize_emotion_label(predicted)
+            feats = self._extract_audio_features(str(audio_path))
+            intensity_proxy = self._intensity_proxy_score(feats, text)
+
             records.append(
                 {
                     "audio_path": audio_path,
-                    "target_emotion": target,
+                    "text": text,
+                    "language": self._extract_field(row, "language"),
+                    "target_primary_emotion": target_primary,
+                    "target_secondary_emotion": target_secondary,
+                    "target_intensity": target_intensity,
                     "predicted_emotion": predicted,
-                    "match": bool(target and predicted and str(target).lower() == str(predicted).lower()),
+                    "primary_match": bool(target_primary and predicted and target_primary == predicted),
+                    "secondary_match": bool(target_secondary and predicted and target_secondary == predicted),
+                    "composite_relaxed_match": bool(
+                        predicted and (predicted == target_primary or predicted == target_secondary)
+                    ),
+                    "duration_sec": feats["duration_sec"],
+                    "rms_db": feats["rms_db"],
+                    "peak_abs": feats["peak_abs"],
+                    "zcr": feats["zcr"],
+                    "intensity_proxy": intensity_proxy,
                 }
             )
-            if target and predicted:
-                target_list.append(str(target).lower())
-                pred_list.append(str(predicted).lower())
+            if target_primary and predicted:
+                target_primary_list.append(target_primary)
+                pred_list.append(predicted)
 
         df = pd.DataFrame(records)
-        detail_path = self.output_dir / "emotion_tendency_results.csv"
-        df.to_csv(detail_path, index=False, encoding="utf-8-sig")
+        detail_jsonl_path = self.output_dir / "emotion_tendency_results.jsonl"
+        detail_txt_path = self.output_dir / "emotion_tendency_results.txt"
+        with detail_jsonl_path.open("w", encoding="utf-8") as f:
+            for row in df.to_dict(orient="records"):
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        self._save_df_txt(df, detail_txt_path)
 
         summary = {
             "num_samples": int(len(df)),
-            "num_with_target_and_prediction": int(len(target_list)),
+            "num_with_primary_target_and_prediction": int(len(target_primary_list)),
             "prediction_distribution": dict(Counter([str(x).lower() for x in df["predicted_emotion"].dropna().tolist()])),
+            "primary_match_rate": float(df["primary_match"].mean()) if len(df) > 0 else None,
+            "secondary_match_rate": float(df["secondary_match"].mean()) if len(df) > 0 else None,
+            "composite_relaxed_match_rate": float(df["composite_relaxed_match"].mean()) if len(df) > 0 else None,
         }
-        if target_list:
-            acc = float(np.mean([t == p for t, p in zip(target_list, pred_list)]))
-            summary["target_match_accuracy"] = acc
+        if target_primary_list:
+            acc = float(np.mean([t == p for t, p in zip(target_primary_list, pred_list)]))
+            summary["target_primary_match_accuracy"] = acc
 
-            labels = sorted(set(target_list + pred_list))
-            cm = confusion_matrix(target_list, pred_list, labels=labels)
+            labels = sorted(set(target_primary_list + pred_list))
+            cm = confusion_matrix(target_primary_list, pred_list, labels=labels)
             cm_df = pd.DataFrame(cm, index=[f"target_{l}" for l in labels], columns=[f"pred_{l}" for l in labels])
-            cm_path = self.output_dir / "emotion_tendency_confusion_matrix.csv"
-            cm_df.to_csv(cm_path, encoding="utf-8-sig")
-            summary["confusion_matrix_csv"] = str(cm_path.resolve())
+            cm_txt_path = self.output_dir / "emotion_tendency_confusion_matrix.txt"
+            self._save_df_txt(cm_df.reset_index().rename(columns={"index": "target"}), cm_txt_path)
+            summary["confusion_matrix_txt"] = str(cm_txt_path.resolve())
+
+            report = classification_report(target_primary_list, pred_list, output_dict=True, zero_division=0)
+            report_path = self.output_dir / "emotion_tendency_classification_report.json"
+            report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            summary["classification_report_json"] = str(report_path.resolve())
+
+        # Intensity-control metric: monotonicity over grouped triples.
+        intensity_summary, intensity_df = self._evaluate_intensity_monotonicity(df)
+        summary.update(intensity_summary)
+        intensity_txt_path = self.output_dir / "emotion_tendency_intensity_groups.txt"
+        self._save_df_txt(intensity_df, intensity_txt_path)
+        summary["intensity_group_txt"] = str(intensity_txt_path.resolve())
 
         summary_path = self.output_dir / "emotion_tendency_summary.json"
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"Saved tendency detail to: {detail_path.resolve()}")
+        print(f"Saved tendency detail to: {detail_jsonl_path.resolve()}")
+        print(f"Saved tendency table to: {detail_txt_path.resolve()}")
         print(f"Saved tendency summary to: {summary_path.resolve()}")
-        return detail_path
+        return detail_jsonl_path
 
 
 def build_argparser() -> argparse.ArgumentParser:
